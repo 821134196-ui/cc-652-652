@@ -8,6 +8,8 @@ target/
 dist/
 build/
 *.log
+data/
+.pytest_cache/
 .claude/
 .cc-workbench/
 轨迹/

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>手术知情同意版本与撤回系统</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">🏥 手术知情同意版本与撤回系统</div>
+    <nav>
+      <button :class="{active: view==='schedule'}" @click="switchView('schedule')">排期总览</button>
+      <button :class="{active: view==='detail'}" @click="detail && switchView('detail')" :disabled="!detail">手术详情</button>
+      <button :class="{active: view==='notifications'}" @click="switchView('notifications')">
+        通知中心 <span v-if="notifications.length" class="pill">{{ notifications.length }}</span>
+      </button>
+    </nav>
+    <button class="ghost" @click="refreshAll" :disabled="busy">⟳ 刷新</button>
+  </header>
+
+  <div v-if="toast" class="toast" :class="toast.type">{{ toast.text }}</div>
+
+  <!-- ==================== 排期总览 ==================== -->
+  <main v-if="view==='schedule'" class="page">
+    <section class="card">
+      <div class="card-head">
+        <h2>手术排期与同意书状态</h2>
+        <button @click="showNewSurgery = !showNewSurgery">＋ 新增手术</button>
+      </div>
+
+      <form v-if="showNewSurgery" class="inline-form" @submit.prevent="createSurgery">
+        <select v-model="newSurgery.patient_id" required>
+          <option value="" disabled>选择患者</option>
+          <option v-for="p in patients" :key="p.id" :value="p.id">{{ p.name }}（{{ p.mrn }}）</option>
+        </select>
+        <input v-model.trim="newSurgery.title" placeholder="手术名称" required>
+        <input v-model.trim="newSurgery.surgeon" placeholder="主刀医生" required>
+        <input v-model="newSurgery.scheduled_at" type="datetime-local" required>
+        <button type="submit" :disabled="busy">创建</button>
+      </form>
+
+      <table class="grid">
+        <thead>
+        <tr>
+          <th>手术时间</th><th>患者</th><th>手术</th><th>主刀</th>
+          <th>当前版本</th><th>签署状态</th><th>排期结论</th><th></th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr v-for="s in surgeries" :key="s.id">
+          <td>{{ fmt(s.scheduled_at) }}</td>
+          <td>{{ s.patient.name }}<br><small class="muted">{{ s.patient.mrn }}</small></td>
+          <td>{{ s.title }}</td>
+          <td>{{ s.surgeon }}</td>
+          <td>
+            <span v-if="s.readiness.current_version_no">V{{ pad(s.readiness.current_version_no) }}</span>
+            <span v-else class="muted">—</span>
+          </td>
+          <td>
+            <span class="badge" :class="stateMeta[s.readiness.state].cls">
+              {{ stateMeta[s.readiness.state].label }}
+            </span>
+            <div v-if="s.readiness.signed_by" class="muted small">
+              {{ s.readiness.signed_by }} · {{ fmt(s.readiness.signed_at) }}
+            </div>
+          </td>
+          <td>
+            <span v-if="s.readiness.ready" class="ok">✔ 可安排</span>
+            <span v-else class="bad">✘ {{ s.readiness.message }}</span>
+          </td>
+          <td><button class="ghost" @click="openDetail(s.id)">详情</button></td>
+        </tr>
+        <tr v-if="!surgeries.length"><td colspan="8" class="muted center">暂无手术</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ==================== 手术详情 ==================== -->
+  <main v-if="view==='detail' && detail" class="page">
+    <section class="card banner" :class="stateMeta[detail.readiness.state].cls">
+      <div>
+        <strong>{{ stateMeta[detail.readiness.state].label }}</strong>
+        <span>　{{ detail.readiness.message }}</span>
+      </div>
+      <button class="ghost" @click="switchView('schedule')">← 返回排期</button>
+    </section>
+
+    <section class="card">
+      <h2>手术信息</h2>
+      <div class="kv">
+        <div><label>患者</label>{{ detail.patient.name }}（{{ detail.patient.mrn }}）</div>
+        <div><label>手术</label>{{ detail.title }}</div>
+        <div><label>主刀医生</label>{{ detail.surgeon }}</div>
+        <div><label>手术时间</label>{{ fmt(detail.scheduled_at) }}</div>
+      </div>
+      <div class="family">
+        <label>获授权家属：</label>
+        <span v-for="f in detail.patient.authorized_family" :key="f.id" class="tag">
+          {{ f.name }}（{{ f.relationship }}）
+        </span>
+        <span v-if="!detail.patient.authorized_family.length" class="muted">无</span>
+        <form class="inline-form slim" @submit.prevent="addFamily">
+          <input v-model.trim="familyForm.name" placeholder="家属姓名" required>
+          <input v-model.trim="familyForm.relationship" placeholder="关系" required>
+          <button type="submit" :disabled="busy">添加授权</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>出具新版本（医生）</h2>
+        <button @click="toggleNewVersion">{{ showNewVersion ? '收起' : '＋ 方案变更 / 新建版本' }}</button>
+      </div>
+      <p class="muted small">关键内容（术式 / 麻醉 / 风险）修改后，原签署立即失效，需患者重新签署；旧签名不可复制到新版。</p>
+      <form v-if="showNewVersion" class="block-form" @submit.prevent="createVersion">
+        <label>术式<textarea v-model.trim="newVersion.procedure" required rows="2"></textarea></label>
+        <label>麻醉方式<input v-model.trim="newVersion.anesthesia" required></label>
+        <label>风险告知<textarea v-model.trim="newVersion.risks" required rows="2"></textarea></label>
+        <label>出具医生<input v-model.trim="newVersion.created_by" required></label>
+        <button type="submit" :disabled="busy">出具新版本</button>
+      </form>
+    </section>
+
+    <section v-if="activeVersion && !activeValidSig" class="card sign-panel">
+      <h2>签署当前版本 V{{ pad(activeVersion.version_no) }}</h2>
+      <div class="sign-grid">
+        <label>签署人角色
+          <select v-model="signForm.signer_role" @change="signForm.signer_name=''">
+            <option value="PATIENT">患者本人</option>
+            <option value="FAMILY">获授权家属</option>
+          </select>
+        </label>
+        <label>签署人姓名
+          <input v-model.trim="signForm.signer_name" list="signer-options" placeholder="姓名" required>
+          <datalist id="signer-options">
+            <option v-if="signForm.signer_role==='PATIENT'" :value="detail.patient.name"></option>
+            <option v-for="f in detail.patient.authorized_family" v-show="signForm.signer_role==='FAMILY'"
+                    :key="f.id" :value="f.name"></option>
+          </datalist>
+        </label>
+        <label v-if="signForm.signer_role==='FAMILY'">与患者关系
+          <input v-model.trim="signForm.relationship" placeholder="如：配偶 / 子女">
+        </label>
+        <div class="sign-actions">
+          <button @click="signActive" :disabled="busy || !signForm.signer_name">获取回执并签署</button>
+          <button v-if="lastSign && lastSign.version_id === activeVersion.id" class="ghost"
+                  @click="replayReceipt" :disabled="busy">模拟重复送达同一回执</button>
+        </div>
+      </div>
+      <p v-if="lastSign && lastSign.version_id === activeVersion.id" class="muted small">
+        最近回执号：<code>{{ lastSign.payload.receipt_id }}</code>
+      </p>
+    </section>
+
+    <section v-if="activeVersion && activeValidSig" class="card withdraw-panel">
+      <h2>撤回知情同意（患者本人）</h2>
+      <p class="muted small">当前版本 V{{ pad(activeVersion.version_no) }} 已由 {{ activeValidSig.signer_name }} 签署。撤回后文件立即失效并通知手术团队，历史文件保留。</p>
+      <div class="inline-form">
+        <input v-model.trim="withdrawForm.withdrawn_by" placeholder="撤回人（须为患者本人）">
+        <input v-model.trim="withdrawForm.reason" placeholder="撤回原因（可选）">
+        <button class="danger" @click="withdraw" :disabled="busy || !withdrawForm.withdrawn_by">撤回同意</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>版本历史（{{ detail.versions.length }}）</h2>
+      <div v-for="v in versionsDesc" :key="v.id" class="version" :class="'st-' + v.status">
+        <div class="version-head">
+          <strong>V{{ pad(v.version_no) }}</strong>
+          <span class="badge" :class="versionStatusMeta[v.status].cls">{{ versionStatusMeta[v.status].label }}</span>
+          <span class="muted small">哈希 {{ v.content_hash.slice(0,12) }}…</span>
+          <a v-if="v.file_path" class="ghost link" :href="'/files/' + v.file_path" target="_blank">查看文件</a>
+        </div>
+        <div class="kv">
+          <div><label>术式</label>{{ v.procedure }}</div>
+          <div><label>麻醉</label>{{ v.anesthesia }}</div>
+          <div><label>风险</label>{{ v.risks }}</div>
+          <div><label>出具</label>{{ v.created_by }} · {{ fmt(v.created_at) }}</div>
+          <div v-if="v.superseded_at"><label>被取代</label>{{ fmt(v.superseded_at) }}</div>
+          <div v-if="v.withdrawn_at"><label>撤回</label>{{ v.withdrawn_by }} · {{ fmt(v.withdrawn_at) }}（{{ v.withdraw_reason }}）</div>
+        </div>
+        <div v-if="v.signatures.length" class="sigs">
+          <div v-for="s in v.signatures" :key="s.id" class="sig" :class="'sig-' + s.status">
+            <span class="badge" :class="s.status==='VALID' ? 'ok-bg' : 'muted-bg'">
+              {{ s.status==='VALID' ? '有效' : '已失效' }}
+            </span>
+            {{ s.signer_name }}
+            <span class="muted">（{{ s.signer_role==='PATIENT' ? '患者本人' : '家属·' + s.relationship }}）</span>
+            · {{ fmt(s.signed_at) }} · 回执 <code>{{ s.receipt_id.slice(0,8) }}…</code>
+            <div v-if="s.invalidated_at" class="muted small">失效于 {{ fmt(s.invalidated_at) }}：{{ s.invalidate_reason }}</div>
+          </div>
+        </div>
+        <div v-else class="muted small">尚未签署</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>本手术通知</h2>
+      <ul class="notes">
+        <li v-for="n in surgeryNotifications" :key="n.id">
+          <span class="badge" :class="notifyMeta[n.type].cls">{{ notifyMeta[n.type].label }}</span>
+          {{ n.message }}
+          <span class="muted small">→ {{ n.recipients.join('、') }} · {{ fmt(n.created_at) }}</span>
+        </li>
+        <li v-if="!surgeryNotifications.length" class="muted">暂无通知</li>
+      </ul>
+    </section>
+  </main>
+
+  <!-- ==================== 通知中心 ==================== -->
+  <main v-if="view==='notifications'" class="page">
+    <section class="card">
+      <h2>通知中心（本地模拟投递）</h2>
+      <ul class="notes">
+        <li v-for="n in notifications" :key="n.id">
+          <span class="badge" :class="notifyMeta[n.type].cls">{{ notifyMeta[n.type].label }}</span>
+          {{ n.message }}
+          <span class="muted small">→ {{ n.recipients.join('、') }} · {{ fmt(n.created_at) }}</span>
+        </li>
+        <li v-if="!notifications.length" class="muted">暂无通知</li>
+      </ul>
+    </section>
+  </main>
+</div>
+
+<script src="/vendor/vue.global.prod.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
