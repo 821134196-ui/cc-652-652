@@ -4,6 +4,7 @@
 node_modules/
 .venv/
 __pycache__/
+.pytest_cache/
 target/
 dist/
 build/
@@ -13,3 +14,6 @@ build/
 轨迹/
 录屏/
 视频/
+
+# 本地运行时数据（SQLite 数据库、签署文件、模拟网关日志）
+backend/data/
